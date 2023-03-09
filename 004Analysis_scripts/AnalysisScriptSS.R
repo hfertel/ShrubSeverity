@@ -1,4 +1,4 @@
-## ---------------------------
+## Header---------------------------
 ##
 ## Script name: Analysis of Shrub Data Script
 ##
@@ -10,36 +10,12 @@
 ##
 ## Copyright (c) Hannah Fertel, 2022
 ## Email: hmfertel@berkeley.edu
-##
-## ---------------------------
-##
-## Notes:
-##   
-##
-## ---------------------------
-
 
 ## ---------------------------
 
-options(scipen = 6, digits = 4) # I prefer to view outputs in non-scientific notation
-memory.limit(30000000)     # this is needed on some PCs to increase memory allowance, but has no impact on macs.
-
-## ---------------------------
-
-## load up the packages we will need:  (uncomment as required)
-
-require(tidyverse)
-require(data.table)
-# source("functions/packages.R")       # loads up all the packages we need
-
-## ---------------------------
-
-## load up our functions into memory
-
-# source("functions/summarise_data.R") 
-
-## ---------------------------
-
+#Packages
+library(tidyverse)
+library(lme4)
 
 ####RDNR for LNU Plots####
 rdnbr_data<-read.csv("002Data/LNUDNBR.csv")
@@ -146,10 +122,9 @@ sev_hopland2<-left_join(x=sev_hopland2,y=transectkey, by="TransectID")
 model3<-lm(sev_hopland2$Avesev~scale(sev_hopland2$MEAN))
 summary(model3)
 
-#####Combo####
+#####SEVERITY MODEL LINEAR MODEL####
 #####combining both Hopland and LNU transects? Or do the different methods make this not feasible
 #scale both independently, then combine and have site as random, num fires included?
-
 #methods are so different, that scaling then combining is what makes sense to me, or keeping separate
 #make them have same colums
 #add treament column with "fire" to LNU, add numprev disturbances to Hopland
@@ -177,59 +152,151 @@ combo4<-combo3 %>%
   mutate(TSF=TSF-Year) %>% 
   mutate(TSF=ifelse(Year==0,65,TSF))
 
+#read in NDVI data--need to run spatial script first
+
+ndvi<-transects1$Mean
+transects<-transects1$Transect
+ndvi<-as.data.frame(ndvi)
+ndvi<-cbind(ndvi,transects)
+ndvi<-ndvi %>% 
+  rename(TransectID=transects)
+#read in all metrics
+allmetrics<-read_rds("002Data/metrics_Transects.rds") %>% 
+  rename(TransectID=Transect) %>% 
+  dplyr::select(-geometry)
+
+combo4<-left_join(combo4,allmetrics)
+
 
 #goal is to generate model of severity metric taking into account other variables
+#add scaled values per site that are for RBR and dnbr
+#ok super unclear on why I'm getting different values...
 
 #assumptions to test first?
 
 library(lme4)
 library(car)
 
+#correlations among variables
+num<-select_if(combo4,is.numeric)
+num<-na.omit(num)
 
-#linear models
+cor(num)
+#ndvi highly correlated to num prev fires...
+#normality of responses?
+hist((combo4$DiamScale))
+hist(scale(combo4$rDNBR))
+#consider transforming the data??
+  
+
+#linear models, simple
 
 model4<-lm(DiamScale~Rdnbrscale+studyarea,data=combo4)
 summary(model4)
-
-
+#new rdnbr stuff
+model4<-lm(DiamScale~scale(Rdnbr)+studyarea,data=combo4)
+summary(model4)
 model5<-lm(DiamScale~Rdnbrscale+site+ NumPrevFires ,data=combo4)
 summary(model5)
-
-model5.1<-model5<-lm(DiamScale~Rdnbrscale+site+ NumPrevFires+TSF ,data=combo4)
+model5.1<-model5<-lm(DiamScale~Rdnbrscale+site+TSF+NumPrevFires ,data=combo4)
 summary(model5.1)
-
 model5.2<-model5<-lm(DiamScale~Rdnbrscale+ NumPrevFires+TSF ,data=combo4)
 summary(model5.2)
-
 par(mfrow = c(2, 2))
 plot(model5.1)
 
-
 #mixed model
-
-model6<-lmer(DiamScale~Rdnbrscale+ NumPrevFires+ TSF+(1|site),data=combo4)
+model6<-lmer(DiamScale~log(rDNBR)+ NumPrevFires+ TSF+(1|site),data=combo4)
 summary(model6)
+car::Anova(model6,type=3)#extract pvalues
+#interaction term
+model6.1<-lmer(DiamScale~log(rDNBR)*TSF+ NumPrevFires+(1|site),data=combo4)
+summary(model6.1)
+car::Anova(model6.1,type=3)#extract pvalues
 
-car::Anova(model6,type=3)
-parameters::p_value(model6)
-
+parameters::p_value(model6)#extract pvalues
 par(mfrow = c(2, 2))
 plot(model6)
-
-AIC(model5.1,model6,model5.2)
-
+AIC(model6)
+#other metrics
+model6.1<-lmer(DiamScale~scale(DNBR)+ NumPrevFires+ TSF+(1|site),data=combo4)
+summary(model6.1)
+car::Anova(model6.1,type=3)
+model6.2<-lmer(DiamScale~scale(RBR)+ NumPrevFires+ TSF+(1|site),data=combo4)
+summary(model6.2)
+car::Anova(model6.2,type=3)
 #in general with all the models what we're seeing is that time since fires has the strongest signal
 #very important variable, confirming what previous studies have found
 
-#bayesian model? 
+#######Severity Model-Bayesian##### 
+library(brms) ##*** 
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(MCMCglmm)
+library(ape)
+library(emmeans)
+
+mod3 <- brm(data = combo4, 
+            family = gaussian,
+            DiamScale ~ 1 + scale(rDNBR) +  
+              TSF+(1|site),
+            iter = 3000,
+            warmup = 1000, cores = 4, chains = 4,
+            seed = 14)
+#save(mod3, file = "models/mod3_treedensity.rda")
+#load("models/mod3_treedensity.rda")
+
+prior_summary(mod3)
+summary(mod3)
+pp_check(mod3) ## posterior predictive check
+plot(mod3) ### look at the fit of each of the model parameters
+conditional_effects(mod3)
+
+#
+
+#categorical variable for TSF?
+
+#####SEM Severity######
+#need conceptual model of the relationships, and to look at distribution of data 
+hist(combo4$DiamScale)
+
+plot(combo4$DiamScale~combo4$TSF)
+plot(combo4$DiamScale~combo4$NumPrevFires)
 
 
-####linking RDNBR and recovery####
+#Lavaan
+library(lavaan)
+
+
+k_mod <- "
+  DiamScale ~ rDNBR+ NumPrevFires+ TSF
+  rDNBR ~~ TSF"
+
+
+k_fit_lavaan <- sem(k_mod, data = combo4)
+summary(k_fit_lavaan)
+
+
+#brms
+#######CART#####
+library(party)
+library(rpart)
+
+
+#ctree
+tree1<-ctree(DiamScale~scale(RBR)+ NumPrevFires+ TSF, data=combo4)
+plot(tree1)
+
+#####ALTERNATIVE APPROACH--THRESHOLDS
+#do I need to think about using clustering algorithims to find thresholds in rdnbr scale for on the ground metrics?
+#carry those through to if they carry predictions for recovery?
+#work backwards from recovery??
+
+
+####RECOVERY MODEL LINEAR MODEL####
 #linkage with rdnbr value and percentage shrub cover along transect?
-
 #read in point line and continuous cover
-
-
 contcvr<-read.csv("002Data/Cont_Shrub_Cvr_LNU22.csv")
 
 #cleaning continuous cover data and will get %cover of shrub...
@@ -247,6 +314,12 @@ contcvr2<-contcvr %>%
   mutate(transleng=50) %>% 
   ungroup() %>% 
   mutate(perc=totallength/transleng)
+#qua005 issue
+qua005<-contcvr %>% 
+  rename(TransectID=ï..TransectID)%>%
+  filter(TransectID=="QUA005") %>% 
+  mutate(leng=End-Start) %>% 
+  filter(Spec=="NS")
 
 S_NS<-contcvr2 %>% 
   filter(Spec=="NS") %>% 
@@ -256,7 +329,7 @@ S_NS<-contcvr2 %>%
 S_NS2<-left_join(x=S_NS,y = rdnbr_data,by="Transect")
 
 par(mfrow = c(2, 2))
-plot(covermodel)
+
 
 ##Hopland Cover Data##
 #read in Hopland cover data
@@ -293,31 +366,101 @@ combocover<-rbind(CombocoverH,CombocoverL)
 
 #left join by transect information
 combocover1<-left_join(combocover,combo4,by="TransectID")
+hist(combocover1$S)
+
+#big issue here is finding the right distribution for this data 
+#perhaps beta distribution is the best...
+#alternatively can do binomial model, successes as counts/100? 
 
 #LNU cover model
 LNUcover<-combocover1 %>% 
   filter(studyarea=="LNU")
-
-#simple linear
-modelcoverlnu1<-lm(S~Rdnbrscale+ NumPrevFires+ TSF,data=LNUcover)
-summary(modelcoverlnu1)
-#with random effects for site
-modelcoverlnu2<-lmer(S~Rdnbrscale+ NumPrevFires+ TSF+(1|site),data=LNUcover)
-summary(modelcoverlnu2)
-car::Anova(modelcoverlnu2,type=3)
-
+hist(LNUcover$S)
+hist(log(LNUcover$S)) #decently normal like this
+modelcoverL<-lmer(log(S)~scale(rDNBR)+ NumPrevFires+ TSF+(1|site),data=LNUcover)
+summary(modelcoverL)
+car::Anova(modelcoverL,type=3)
 
 #Hopland cover model
 Hopcover<-combocover1 %>% 
   filter(studyarea=="Hopland")
+hist(Hopcover$S) #more normal in raw form
+hist(log(Hopcover$S))
+modelcoverH<-lmer(S~scale(rDNBR)+ NumPrevFires+ TSF+(1|site),data=Hopcover)
+summary(modelcoverH)
+car::Anova(modelcoverH,type=3)
 
-#simple linear
-modelcoverHop1<-lm(S~Rdnbrscale+ NumPrevFires+ TSF,data=Hopcover)
-summary(modelcoverHop1)
-#with random effects for site
-modelcoverHop2<-lmer(S~Rdnbrscale+ NumPrevFires+ TSF+(1|site),data=Hopcover)
-summary(modelcoverHop2)
-car::Anova(modelcoverHop2,type=3)
+
+#cover model, both
+#add variable for years since fire
+combocover1<-combocover1 %>% 
+  mutate(years= as.factor(ifelse(studyarea=="Hopland",3,2)))
+modelcover<-lmer(S~scale(rDNBR)+ NumPrevFires+ TSF+years+(1|site),data=combocover1)
+summary(modelcover)
+car::Anova(modelcover,type=3)
+
+
+
+######Bayesian Cover Model#####
+#bayesian model? 
+library(brms) ##*** 
+library(tidybayes)
+library(bayesplot)
+library(rstan)
+library(MCMCglmm)
+library(ape)
+library(emmeans)
+
+mod3 <- brm(data = combocover1, 
+            family = gaussian,
+            S ~ 1 + scale(rDNBR) +  
+              TSF+ NumPrevFires+years+ (1|site),
+            iter = 3000,
+            warmup = 1000, cores = 4, chains = 4,
+            seed = 14)
+
+
+prior_summary(mod3)
+summary(mod3)
+pp_check(mod3)
+## posterior predictive check
+plot(mod3) ### look at the fit of each of the model parameters
+
+
+#I think it needs to be a beta model--need to nail down how to format this
+#beta binomial?
+
+betamod1 <- brm(S ~ 1 + scale(rDNBR) +  
+                  TSF+ NumPrevFires+years+ (1|site), data=combocover1, family="beta",
+                iter = 3000,
+                warmup = 1000, cores = 4, chains = 4,
+                seed = 14)
+
+prior_summary(betamod1)
+summary(betamod1)
+
+pp_check(betamod1)
+plot(betamod1)
+
+#interpreting outputs from this??
+
+######Beta model by seeding strategy#####
+#need percent cover by each species type for each transcript# 
+
+
+
+
+
+#######CART Recovery#####
+library(party)
+library(rpart) 
+
+#split into low, moderate and high cover and then regress using the trees...
+
+
+#ctree
+tree1<-ctree(S~scale(rDNBR)+ NumPrevFires+TSF, data=Hopcover)
+plot(tree1)
 
 
 #####By Species continuous cover####
@@ -361,5 +504,7 @@ ptline4<-ptline3 %>%
   summarise(perc=sum(perc)) %>% 
   ungroup()
 
+##benefit of this is using count data models...
 
 
+######Binomial Model Cover#####
